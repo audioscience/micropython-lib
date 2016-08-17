@@ -109,6 +109,9 @@ def info(msg, *args):
 def debug(msg, *args):
     getLogger().debug(msg, *args)
 
+def error(msg, *args):
+    getLogger(None).error(msg, *args)
+
 def basicConfig(level=INFO, filename=None, stream=None, format=None):
     global _level, _stream
     _level = level
