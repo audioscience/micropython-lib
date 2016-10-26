@@ -15,10 +15,12 @@ class Process:
     def start(self):
         self.pid = os.fork()
         if not self.pid:
-            if self.r:
-                self.r.close()
-            self.target(*self.args, **self.kwargs)
-            os._exit(0)
+            try:
+                if self.r:
+                    self.r.close()
+                self.target(*self.args, **self.kwargs)
+            finally:
+                os._exit(0)
         else:
             if self.w:
                 self.w.close()
