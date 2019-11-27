@@ -55,9 +55,7 @@ class EventLoop:
                 tnow = self.time()
                 delay = t - tnow
                 if delay > 0:
-                    self.call_at(t, cb, *args)
                     self.wait(delay)
-                    continue
             else:
                 self.wait(-1)
                 # Assuming IO completion scheduled some tasks
