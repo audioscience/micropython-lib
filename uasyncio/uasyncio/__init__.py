@@ -11,12 +11,6 @@ class EpollEventLoop(EventLoop):
         self.poller = select.poll()
         self.objmap = {}
 
-    def remove_polled_cb(self, _id):
-        for fd, cb in self.objmap.items():
-            if id(cb) == _id:
-                self.poller.unregister(fd)
-                break
-
     def add_reader(self, fd, cb, *args):
         if __debug__:
             log.debug("add_reader%s", (fd, cb, args))
