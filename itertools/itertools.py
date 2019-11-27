@@ -55,12 +55,3 @@ def tee(iterable, n=2):
 def starmap(function, iterable):
     for args in iterable:
         yield function(*args)
-
-def product(*args, repeat=1):
-    if not args:
-        yield ()
-    else:
-        args = args*repeat
-        for a in args[0]:
-            for prod in product(*args[1:]):
-                yield (a,)+prod
