@@ -81,7 +81,7 @@ class StreamReader:
             res = self.s.read(n)
             if res is not None:
                 break
-            log.warning("Empty read")
+            log.warn("Empty read")
         if not res:
             yield IOReadDone(self.s)
         return res
@@ -96,7 +96,7 @@ class StreamReader:
             res = self.s.readline()
             if res is not None:
                 break
-            log.warning("Empty read")
+            log.warn("Empty read")
         if not res:
             yield IOReadDone(self.s)
         if __debug__:
