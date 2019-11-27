@@ -36,7 +36,7 @@ class EventLoop:
         # Including self.cnt is a workaround per heapq docs
         if __debug__:
             log.debug("Scheduling %s", (time, self.cnt, callback, args, exc))
-        heapq.heappush(self.q, (time, self.cnt, callback, args, exc, False))
+        heapq.heappush(self.q, (time, self.cnt, callback, args, exc))
 #        print(self.q)
         self.cnt += 1
 
@@ -50,30 +50,24 @@ class EventLoop:
     def cancel(self, callback, exc = CancelledError):
         _id = id(callback)
         for idx, item in enumerate(self.q):
-            t, cnt, cb, args, _exc = item
+            t, cnt, cb, args, exc = item
             if id(cb) != _id:
                 continue
-            if __debug__:
-                log.debug("Setting discard flag on: %s at index %d", (t, cnt, cb, args, _exc), idx)
-            self.q[idx] = t, cnt, cb, args, _exc, True
+            del self.q[idx]
+            heapq.heapify(self.q)
             self.call_at(0, cb, *args, exc=exc)
+            return
         self.remove_polled_cb(callback)
 
     def run_forever(self):
         while True:
             if self.q:
-                tnow = self.time()
+                t, cnt, cb, args, exc = heapq.heappop(self.q)
                 if __debug__:
-                    log.debug('*'*20+' sched step start at %s, num tasks in queue %d', tnow, len(self.q))
-                t, cnt, cb, args, exc, discard = heapq.heappop(self.q)
-                delay = t - tnow
-                if __debug__:
-                    log.debug("Next coroutine to run in %s: %s", delay, (t, cnt, cb, args, exc))
-                if discard:
-                    if __debug__:
-                        log.debug("Discarding: %s", (t, cnt, cb, args, exc, discard))
-                    continue
+                    log.debug("Next coroutine to run: %s", (t, cnt, cb, args, exc))
 #                __main__.mem_info()
+                tnow = self.time()
+                delay = t - tnow
                 if delay > 0 and not exc:
                     self.call_at(t, cb, *args)
                     self.wait(delay)
@@ -83,9 +77,8 @@ class EventLoop:
                 # Assuming IO completion scheduled some tasks
                 continue
             # cancelled callbacks aren't called and nor rescheduled
-            if callable(cb):
-                if not exc:
-                    cb(*args)
+            if callable(cb) and not exc:
+                cb(*args)
             else:
                 delay = 0
                 try:
@@ -118,9 +111,9 @@ class EventLoop:
                             self.add_writer(arg.fileno(), cb)
                             continue
                         elif isinstance(ret, IOReadDone):
-                            self.remove_reader(arg.fileno(), cb)
+                            self.remove_reader(arg.fileno())
                         elif isinstance(ret, IOWriteDone):
-                            self.remove_writer(arg.fileno(), cb)
+                            self.remove_writer(arg.fileno())
                         elif isinstance(ret, StopLoop):
                             return arg
                     elif isinstance(ret, type_gen):

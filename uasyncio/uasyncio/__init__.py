@@ -11,64 +11,55 @@ class EpollEventLoop(EventLoop):
         self.poller = select.poll()
         self.objmap = {}
 
-    def _unregister_fd(self, fd):
-        self.objmap.pop(fd, None)
-        try:
-            self.poller.unregister(fd)
-        except OSError as e:
-            if e.args[0] != errno.ENOENT:
-                raise
-
-    def remove_polled_cb(self, cb):
-        _id = id(cb)
-        for fd, cbs in self.objmap.items():
-            cbs.pop(id(cb), None)
-            if not cbs:
-                self._unregister_fd(fd)
+    def remove_polled_cb(self, _id):
+        for fd, cb in self.objmap.items():
+            if id(cb) == _id:
+                self.poller.unregister(fd)
+                break
 
     def add_reader(self, fd, cb, *args):
         if __debug__:
             log.debug("add_reader%s", (fd, cb, args))
-        cbs = self.objmap.setdefault(fd, {})
-        self.poller.register(fd, select.POLLIN)
         if args:
-            cbs[id(cb)] = (cb, args)
+            self.poller.register(fd, select.POLLIN)
+            self.objmap[fd] = (cb, args)
         else:
-            cbs[id(cb)] = (cb, None)
+            self.poller.register(fd, select.POLLIN)
+            self.objmap[fd] = cb
 
-    def remove_reader(self, fd, cb):
+    def remove_reader(self, fd):
         if __debug__:
-            log.debug("remove_reader(%s)", (fd, cb))
-        cbs = self.objmap.get(fd, {})
-        cbs.pop(id(cb), None)
-        if not cbs:
-            self._unregister_fd(fd)
+            log.debug("remove_reader(%s)", fd)
+        self.poller.unregister(fd)
+        del self.objmap[fd]
 
     def add_writer(self, fd, cb, *args):
         if __debug__:
             log.debug("add_writer%s", (fd, cb, args))
-        cbs = self.objmap.setdefault(fd, {})
-        self.poller.register(fd, select.POLLOUT)
         if args:
-            cbs[id(cb)] = (cb, args)
+            self.poller.register(fd, select.POLLOUT)
+            self.objmap[fd] = (cb, args)
         else:
-            cbs[id(cb)] = (cb, None)
+            self.poller.register(fd, select.POLLOUT)
+            self.objmap[fd] = cb
 
-    def remove_writer(self, fd, cb):
+    def remove_writer(self, fd):
         if __debug__:
             log.debug("remove_writer(%s)", fd)
-        cbs = self.objmap.get(fd, {})
-        cbs.pop(id(cb), None)
-        if not cbs:
-            self._unregister_fd(fd)
+        try:
+            self.poller.unregister(fd)
+            self.objmap.pop(fd, None)
+        except OSError as e:
+            # StreamWriter.awrite() first tries to write to an fd,
+            # and if that succeeds, yield IOWrite may never be called
+            # for that fd, and it will never be added to poller. So,
+            # ignore such error.
+            if e.args[0] != errno.ENOENT:
+                raise
 
     def wait(self, delay):
         if __debug__:
-            log.debug("epoll.wait(%s)", delay)
-            for fd, cbs in self.objmap.items():
-                for cb, args in cbs.values():
-                    log.debug("epoll.registered(%d) %s", fd, (cb, args))
-
+            log.debug("epoll.wait(%d)", delay)
         # We need one-shot behavior (second arg of 1 to .poll())
         if delay == -1:
             res = self.poller.poll(-1, 1)
@@ -76,30 +67,13 @@ class EpollEventLoop(EventLoop):
             res = self.poller.poll(int(delay * 1000), 1)
         #log.debug("epoll result: %s", res)
         for fd, ev in res:
-            # Remove the registered callbacks dictionary from its parent
-            # so when callbacks are invoked they can add their registrations
-            # to a fresh dictionary.
-            cbs = self.objmap.pop(fd, {})
-            if not cbs:
-                log.error("Event %d on fd %r but no callback registered", ev, fd)
-                continue
+            cb = self.objmap[fd]
             if __debug__:
-                s = '\n'.join(str(v) for v in cbs.values())
-                log.debug("Matching IO callbacks for %r:\n%s", (fd, ev), s)
-            while cbs:
-                _id, data = cbs.popitem()
-                cb, args = data
-                if args is None:
-                    if __debug__:
-                        log.debug("Scheduling IO coro: %r", (fd, ev, cb))
-                    self.call_soon(cb)
-                else:
-                    if __debug__:
-                        log.debug("Calling IO callback: %r", (fd, ev, cb, args))
-                    cb(*args)
-            # If no callback registered an event for this fd unregister it
-            if not self.objmap.get(fd, None):
-                self._unregister_fd(fd)
+                log.debug("Calling IO callback: %r", cb)
+            if isinstance(cb, tuple):
+                cb[0](*cb[1])
+            else:
+                self.call_soon(cb)
 
 
 class StreamReader:
