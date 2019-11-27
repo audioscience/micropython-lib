@@ -10,13 +10,16 @@ TESTFN = '@test'
 def run_unittest(*classes):
     suite = unittest.TestSuite()
     for c in classes:
-        suite.addTest(c)
+        if isinstance(c, str):
+            c = __import__(c)
+            for name in dir(c):
+                obj = getattr(c, name)
+                if isinstance(obj, type) and issubclass(obj, unittest.TestCase):
+                    suite.addTest(obj)
+        else:
+            suite.addTest(c)
     runner = unittest.TestRunner()
     result = runner.run(suite)
-    msg = "Ran %d tests" % result.testsRun
-    if result.skippedNum > 0:
-        msg += " (%d skipped)" % result.skippedNum
-    print(msg)
 
 def can_symlink():
     return False
@@ -57,3 +60,6 @@ def captured_output(stream_name):
 
 def captured_stderr():
     return captured_output("stderr")
+
+def requires_IEEE_754(f):
+    return f

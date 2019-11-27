@@ -4,18 +4,17 @@ import sys
 sys.path.pop(0)
 from setuptools import setup
 sys.path.append("..")
-import optimize_upip
+import sdist_upip
 
 setup(name='micropython-uasyncio.core',
-      version='0.9.2',
-      description='uasyncio.core module for MicroPython',
-      long_description='Lightweight implementation of asyncio-like library built around native Python coroutines. (Core event loop).',
+      version='2.0',
+      description='Lightweight asyncio-like library for MicroPython, built around native Python coroutines. (Core event loop).',
+      long_description='Lightweight asyncio-like library for MicroPython, built around native Python coroutines. (Core event loop).',
       url='https://github.com/micropython/micropython-lib',
       author='Paul Sokolovsky',
       author_email='micro-python@googlegroups.com',
-      maintainer='MicroPython Developers',
+      maintainer='micropython-lib Developers',
       maintainer_email='micro-python@googlegroups.com',
       license='MIT',
-      cmdclass={'optimize_upip': optimize_upip.OptimizeUpip},
-      packages=['uasyncio'],
-      install_requires=['micropython-logging'])
+      cmdclass={'sdist': sdist_upip.sdist},
+      packages=['uasyncio'])

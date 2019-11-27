@@ -3,6 +3,9 @@ import ustruct as struct
 import os
 import errno
 import ffilib
+import utime
+import math
+from uselect import *
 
 
 libc = ffilib.libc()
@@ -26,6 +29,9 @@ EPOLLET  = 1 << 31
 EPOLL_CTL_ADD = 1
 EPOLL_CTL_DEL = 2
 EPOLL_CTL_MOD = 3
+
+# Not included in uselect.
+POLLPRI = 0x002
 
 # TODO: struct epoll_event's 2nd member is union of uint64_t, etc.
 # On x86, uint64_t is 4-byte aligned, on many other platforms - 8-byte.
@@ -67,18 +73,27 @@ class Epoll:
         os.check_error(r)
         del self.registry[fd]
 
-    def poll(self, timeout=-1):
+    def poll_ms(self, timeout=-1):
         s = bytearray(self.evbuf)
+        if timeout >= 0:
+            deadline = utime.ticks_add(utime.ticks_ms(), timeout)
         while True:
             n = epoll_wait(self.epfd, s, 1, timeout)
             if not os.check_error(n):
                 break
-            # TODO: what about timeout value?
+            if timeout >= 0:
+                timeout = utime.ticks_diff(deadline, utime.ticks_ms())
+                if timeout < 0:
+                    n = 0
+                    break
         res = []
         if n > 0:
             vals = struct.unpack(epoll_event, s)
             res.append((vals[1], vals[0]))
         return res
+
+    def poll(self, timeout=-1):
+        return self.poll_ms(-1 if timeout == -1 else math.ceil(timeout * 1000))
 
     def close(self):
         os.close(self.epfd)

@@ -13,7 +13,7 @@ import sys
 sys.path.pop(0)
 from setuptools import setup
 sys.path.append("..")
-import optimize_upip
+import sdist_upip
 
 setup(name='micropython-%(dist_name)s',
       version='%(version)s',
@@ -25,7 +25,7 @@ setup(name='micropython-%(dist_name)s',
       maintainer=%(maintainer)r,
       maintainer_email='micro-python@googlegroups.com',
       license=%(license)r,
-      cmdclass={'optimize_upip': optimize_upip.OptimizeUpip},
+      cmdclass={'sdist': sdist_upip.sdist},
       %(_what_)s=[%(modules)s]%(_inst_req_)s)
 """
 
@@ -68,7 +68,7 @@ This is MicroPython compatibility module, allowing applications using
 MicroPython-specific features to run on CPython.
 """
 
-MICROPYTHON_DEVELS = 'MicroPython Developers'
+MICROPYTHON_DEVELS = 'micropython-lib Developers'
 MICROPYTHON_DEVELS_EMAIL = 'micro-python@googlegroups.com'
 CPYTHON_DEVELS = 'CPython Developers'
 CPYTHON_DEVELS_EMAIL = 'python-dev@python.org'
@@ -156,12 +156,12 @@ def main():
             data["dist_name"] = dirname
         if "name" not in data:
             data["name"] = module
-        if data["long_desc"] == "README.rst":
+        if data["long_desc"] in ("README", "README.rst"):
             data["long_desc"] = "open(%r).read()" % data["long_desc"]
         else:
             data["long_desc"] = repr(data["long_desc"])
 
-        data["modules"] = "'" + data["name"].split(".", 1)[0] + "'"
+        data["modules"] = "'" + data["name"].rsplit(".", 1)[0] + "'"
         if "extra_modules" in data:
             data["modules"] += ", " + ", ".join(["'" + x.strip() + "'" for x in data["extra_modules"].split(",")])
 

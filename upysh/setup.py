@@ -4,17 +4,17 @@ import sys
 sys.path.pop(0)
 from setuptools import setup
 sys.path.append("..")
-import optimize_upip
+import sdist_upip
 
 setup(name='micropython-upysh',
       version='0.6.1',
       description='Minimalistic file shell using native Python syntax.',
       long_description='Minimalistic file shell using native Python syntax.',
       url='https://github.com/micropython/micropython-lib',
-      author='MicroPython Developers',
+      author='micropython-lib Developers',
       author_email='micro-python@googlegroups.com',
-      maintainer='MicroPython Developers',
+      maintainer='micropython-lib Developers',
       maintainer_email='micro-python@googlegroups.com',
       license='MIT',
-      cmdclass={'optimize_upip': optimize_upip.OptimizeUpip},
+      cmdclass={'sdist': sdist_upip.sdist},
       py_modules=['upysh'])

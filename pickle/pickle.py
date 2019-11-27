@@ -1,8 +1,10 @@
-def dump(obj, f):
+HIGHEST_PROTOCOL = 0
+
+def dump(obj, f, proto=0):
     f.write(repr(obj))
 
-def dumps(obj):
-    return repr(obj)
+def dumps(obj, proto=0):
+    return repr(obj).encode()
 
 def load(f):
     s = f.read()
@@ -10,5 +12,11 @@ def load(f):
 
 def loads(s):
     d = {}
-    exec("v=" + s, d)
-    return d["v"]
+    s = s.decode()
+    if "(" in s:
+        qualname = s.split("(", 1)[0]
+        if "." in qualname:
+            pkg = qualname.rsplit(".", 1)[0]
+            mod = __import__(pkg)
+            d[pkg] = mod
+    return eval(s, d)
