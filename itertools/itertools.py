@@ -66,3 +66,12 @@ def accumulate(iterable, func=lambda x, y: x + y):
     for element in it:
         acc = func(acc, element)
         yield acc
+
+def product(*args, repeat=1):
+    if not args:
+        yield ()
+    else:
+        args = args*repeat
+        for a in args[0]:
+            for prod in product(*args[1:]):
+                yield (a,)+prod
