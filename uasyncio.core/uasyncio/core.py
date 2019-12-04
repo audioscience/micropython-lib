@@ -50,7 +50,7 @@ class EventLoop:
     def cancel(self, callback, exc = CancelledError):
         _id = id(callback)
         for idx, item in enumerate(self.q):
-            t, cnt, cb, args, _exc = item
+            t, cnt, cb, args, _exc, _discard = item
             if id(cb) != _id:
                 continue
             if __debug__:
