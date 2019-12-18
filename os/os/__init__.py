@@ -148,7 +148,7 @@ def walk(top, topdown=True):
     files = []
     dirs = []
     for dirent in ilistdir(top):
-        mode = dirent[1] << 12
+        mode = dirent[1]
         fname = fsdecode(dirent[0])
         if stat_.S_ISDIR(mode):
             if fname != "." and fname != "..":
