@@ -24,7 +24,6 @@ class EpollEventLoop(EventLoop):
         self.objmap = {}
 
     def _unregister_fd(self, fd):
-        self.objmap.pop(fd, None)
         try:
             self.poller.unregister(fd)
         except OSError as e:
