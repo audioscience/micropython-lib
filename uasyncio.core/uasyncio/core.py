@@ -76,7 +76,7 @@ class EventLoop:
                 prev = coro.pend_throw(exc)
                 if __debug__ and DEBUG:
                     log.debug("Cancelling %s asynchronously", coro)
-                if prev is False:
+                if prev is None:
                     _event_loop.remove_polled_cb(coro)
                     _event_loop.call_soon(coro)
             except TypeError:
