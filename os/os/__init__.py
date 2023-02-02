@@ -60,6 +60,7 @@ if libc:
     execvp_ = libc.func("i", "execvp", "PP")
     kill_ = libc.func("i", "kill", "ii")
     getenv_ = libc.func("s", "getenv", "P")
+    setpgid_ = libc.func("i", "setpgid", "ii")
 
 
 
@@ -236,6 +237,11 @@ def waitpid(pid, opts):
 def kill(pid, sig):
     r = kill_(pid, sig)
     check_error(r)
+
+def setpgid(pid, pgid):
+    r = setpgid_(pid, pgid)
+    check_error(r)
+    return r
 
 def system(command):
     r = system_(command)
