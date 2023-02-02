@@ -21,6 +21,11 @@ O_TRUNC    = 0o0001000
 O_APPEND   = 0o0002000
 O_NONBLOCK = 0o0004000
 
+WNOHANG    = 0x00000001
+
+SIGKILL    = 9
+SIGTERM    = 15
+
 error = OSError
 name = "posix"
 sep = "/"
