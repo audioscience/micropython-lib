@@ -9,6 +9,9 @@ _mount = libc.func('i', 'mount', 'sssLs')
 _umount = libc.func('i', 'umount', 's')
 _setenv = libc.func('i', 'setenv', 'ssi')
 _reboot_syscall = libc.func('l', 'syscall', 'liiis')
+_realpath = libc.func("s", "realpath", "ss")
+_free = libc.func("v", "free", "p")
+
 
 
 LINUX_REBOOT_MAGIC1         = 0xfee1dead
@@ -58,3 +61,10 @@ def execvp(executable, args = []):
 def setenv(name, value, overwrite = True):
 	e = _setenv(name, value, 1 if overwrite else 0)
 	os.check_error(e)
+
+def realpath(path):
+	p = _realpath(path, None)
+	_free(p)
+	if p == None:
+		os.raise_error()
+	return p
