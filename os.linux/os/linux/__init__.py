@@ -64,7 +64,8 @@ def setenv(name, value, overwrite = True):
 
 def realpath(path):
 	p = _realpath(path, None)
-	_free(p)
+	# Do not free the string here, it is tracked by upy and freed by it.
+	# _free(p)
 	if p == None:
 		os.raise_error()
 	return p
