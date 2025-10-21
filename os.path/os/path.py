@@ -61,3 +61,9 @@ def expanduser(s):
         # Sorry folks, follow conventions
         return "/home/" + s[1:]
     return s
+
+try:
+    import uos
+    realpath = uos.realpath
+except ImportError:
+    from os.linux import realpath
