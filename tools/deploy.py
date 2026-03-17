@@ -8,8 +8,9 @@ The official 'mip' tool downloads pre-compiled .mpy files from the network.
 There is no official way to deploy packages from a local micropython-lib source
 tree to a directory usable by the Unix port.  This script fills that gap.
 
-It parses manifest.py files (using a lightweight manifest parser),
-resolves dependencies, and copies .py source files to a destination directory.
+It parses manifest.py files and package.json files (the two packaging formats
+used in the MicroPython ecosystem), resolves dependencies, and copies .py source
+files to a destination directory.
 
 Usage examples:
 
@@ -22,14 +23,20 @@ Usage examples:
     # Include unix-ffi packages too:
     deploy.py --output ~/.micropython/lib --all --unix-ffi
 
-    # Deploy specific packages including unix-ffi search path:
-    deploy.py --output ~/.micropython/lib --unix-ffi os json
+    # Deploy from a cloned third-party repo (supports manifest.py and package.json):
+    deploy.py --output ~/.micropython/lib --repo /path/to/micropython-async primitives
+
+    # Combine micropython-lib and third-party repos:
+    deploy.py --output ~/.micropython/lib --repo /path/to/repo1 --repo /path/to/repo2 --all
 
     # Dry-run to see what would be installed:
     deploy.py --output ~/.micropython/lib --dry-run logging requests
 
     # List all available packages:
     deploy.py --list
+
+    # List packages from a third-party repo:
+    deploy.py --list --repo /path/to/micropython-async
 
     # List packages matching a pattern:
     deploy.py --list --filter "hash*"
@@ -38,6 +45,7 @@ The output directory should be in MICROPYPATH so MicroPython can find the module
     export MICROPYPATH=~/.micropython/lib
 """
 
+import json
 import os
 import sys
 
@@ -240,7 +248,6 @@ except ImportError:
         return ni == len(name)
 
 
-
 # ---- str.ljust ----
 
 def ljust(s, width, fillchar=" "):
@@ -299,41 +306,8 @@ def find_files(directory, filename):
 
 
 # ===========================================================================
-# Core logic
+# Manifest parsing -- manifest.py (micropython-lib native format)
 # ===========================================================================
-
-
-def discover_packages(lib_dirs, include_unix_ffi=False):
-    """
-    Scan the micropython-lib tree for all packages with manifest.py files.
-    Returns dict: package_name -> {manifest, dir, lib}.
-    """
-    search_dirs = list(lib_dirs)
-    if include_unix_ffi:
-        search_dirs.append("unix-ffi")
-
-    packages = {}
-    for lib_name in search_dirs:
-        lib_path = join(LIB_DIR, lib_name)
-        if not isdir(lib_path):
-            continue
-        for manifest_path in find_files(lib_path, "manifest.py"):
-            pkg_dir = dirname(manifest_path)
-            pkg_name = basename(pkg_dir)
-            if pkg_name in packages:
-                if lib_name == "unix-ffi":
-                    packages[pkg_name] = {
-                        "manifest": manifest_path,
-                        "dir": pkg_dir,
-                        "lib": lib_name,
-                    }
-            else:
-                packages[pkg_name] = {
-                    "manifest": manifest_path,
-                    "dir": pkg_dir,
-                    "lib": lib_name,
-                }
-    return packages
 
 
 def parse_manifest(manifest_path):
@@ -342,6 +316,7 @@ def parse_manifest(manifest_path):
     Uses a sandboxed exec with stub functions for the manifest API.
 
     Returns (metadata_dict, file_entries, dependencies).
+    file_entries: list of ("module"|"package", name, kwargs).
     """
     metadata_info = {}
     file_entries = []
@@ -394,6 +369,178 @@ def parse_manifest(manifest_path):
     return metadata_info, file_entries, dependencies
 
 
+# ===========================================================================
+# Manifest parsing -- package.json (mip / third-party format)
+# ===========================================================================
+
+
+def _resolve_pkg_json_source(source_url, pkg_dir, repo_root):
+    """
+    Resolve a package.json source URL to a local filesystem path.
+
+    Handles:
+      - github:org/repo/path  -> repo_root/path
+      - gitlab:org/repo/path  -> repo_root/path
+      - relative/path         -> pkg_dir/relative/path
+      - http(s) URLs          -> None (cannot resolve locally)
+    """
+    for prefix in ("github:", "gitlab:"):
+        if source_url.startswith(prefix):
+            path_after = source_url[len(prefix):]
+            parts = path_after.split("/", 2)
+            if len(parts) >= 3:
+                return join(repo_root, parts[2])
+            return None
+    if source_url.startswith("http://") or source_url.startswith("https://"):
+        return None
+    return join(pkg_dir, source_url)
+
+
+def parse_package_json(json_path, repo_root):
+    """
+    Parse a package.json file (mip format).
+
+    Returns (metadata_dict, file_entries, dependencies) -- same shape as
+    parse_manifest() so callers can treat both formats uniformly.
+
+    file_entries: list of ("url_file", target_path, {"source": local_path}).
+    """
+    with open(json_path, "r") as f:
+        data = json.load(f)
+
+    pkg_dir = dirname(json_path)
+    metadata = {"version": data.get("version", "")}
+    file_entries = []
+    dependencies = []
+
+    for entry in data.get("urls", []):
+        if not isinstance(entry, list) or len(entry) < 2:
+            continue
+        target, source_url = entry[0], entry[1]
+        local_src = _resolve_pkg_json_source(source_url, pkg_dir, repo_root)
+        if local_src is not None:
+            file_entries.append(("url_file", target, {"source": local_src}))
+
+    for dep_entry in data.get("deps", []):
+        if not isinstance(dep_entry, list) or len(dep_entry) < 1:
+            continue
+        dep_name = dep_entry[0]
+        for prefix in ("github:", "gitlab:"):
+            if dep_name.startswith(prefix):
+                # github:org/repo -> use repo basename as package name
+                parts = dep_name[len(prefix):].rstrip("/").split("/")
+                dep_name = parts[-1] if parts else dep_name
+                break
+        dependencies.append(dep_name)
+
+    return metadata, file_entries, dependencies
+
+
+# ===========================================================================
+# Unified parse dispatcher
+# ===========================================================================
+
+
+def parse_package(pkg_info):
+    """
+    Parse package metadata regardless of format.
+    Dispatches to parse_manifest() or parse_package_json() based on the
+    'format' key in pkg_info.
+
+    Returns (metadata_dict, file_entries, dependencies).
+    """
+    if pkg_info.get("format") == "package.json":
+        return parse_package_json(
+            pkg_info["manifest"], pkg_info.get("repo_root", pkg_info["dir"])
+        )
+    return parse_manifest(pkg_info["manifest"])
+
+
+# ===========================================================================
+# Package discovery
+# ===========================================================================
+
+
+def discover_packages(lib_dirs, include_unix_ffi=False):
+    """
+    Scan the micropython-lib tree for packages with manifest.py files.
+    Returns dict: package_name -> pkg_info.
+    """
+    search_dirs = list(lib_dirs)
+    if include_unix_ffi:
+        search_dirs.append("unix-ffi")
+
+    packages = {}
+    for lib_name in search_dirs:
+        lib_path = join(LIB_DIR, lib_name)
+        if not isdir(lib_path):
+            continue
+        for manifest_path in find_files(lib_path, "manifest.py"):
+            pkg_dir = dirname(manifest_path)
+            pkg_name = basename(pkg_dir)
+            if pkg_name in packages:
+                if lib_name == "unix-ffi":
+                    packages[pkg_name] = {
+                        "manifest": manifest_path,
+                        "dir": pkg_dir,
+                        "lib": lib_name,
+                        "format": "manifest.py",
+                    }
+            else:
+                packages[pkg_name] = {
+                    "manifest": manifest_path,
+                    "dir": pkg_dir,
+                    "lib": lib_name,
+                    "format": "manifest.py",
+                }
+    return packages
+
+
+def discover_repo_packages(repo_dir):
+    """
+    Scan a third-party repo directory for packages.
+
+    Looks for both package.json (mip format) and manifest.py (micropython-lib
+    format).  When both exist in the same directory, manifest.py takes
+    precedence since it describes the local file layout directly.
+
+    Returns dict: package_name -> pkg_info.
+    """
+    repo_root = abspath(repo_dir)
+    lib_name = basename(repo_root)
+    packages = {}
+
+    # Pass 1: package.json files
+    for json_path in find_files(repo_root, "package.json"):
+        pkg_dir = dirname(json_path)
+        pkg_name = basename(pkg_dir)
+        packages[pkg_name] = {
+            "manifest": json_path,
+            "dir": pkg_dir,
+            "lib": lib_name,
+            "format": "package.json",
+            "repo_root": repo_root,
+        }
+
+    # Pass 2: manifest.py files (override package.json for same directory)
+    for manifest_path in find_files(repo_root, "manifest.py"):
+        pkg_dir = dirname(manifest_path)
+        pkg_name = basename(pkg_dir)
+        packages[pkg_name] = {
+            "manifest": manifest_path,
+            "dir": pkg_dir,
+            "lib": lib_name,
+            "format": "manifest.py",
+        }
+
+    return packages
+
+
+# ===========================================================================
+# Core logic
+# ===========================================================================
+
+
 def resolve_dependencies(package_names, all_packages, resolved=None, resolving=None):
     """
     Recursively resolve dependencies for the given package names.
@@ -414,8 +561,7 @@ def resolve_dependencies(package_names, all_packages, resolved=None, resolving=N
             continue
 
         resolving.add(name)
-        pkg = all_packages[name]
-        _, _, deps = parse_manifest(pkg["manifest"])
+        _, _, deps = parse_package(all_packages[name])
         resolve_dependencies(deps, all_packages, resolved, resolving)
         resolving.discard(name)
 
@@ -429,19 +575,28 @@ def collect_files(pkg_name, pkg_info):
     """
     Collect all .py files that need to be copied for a package.
     Returns list of (src_path, target_path) tuples.
+    Handles both manifest.py and package.json formats.
     """
-    _, file_entries, _ = parse_manifest(pkg_info["manifest"])
+    _, file_entries, _ = parse_package(pkg_info)
     pkg_dir = pkg_info["dir"]
     result = []
 
     for entry_type, name, kwargs in file_entries:
-        base_path = kwargs.get("base_path", ".")
-        if base_path == ".":
-            base_path = pkg_dir
-        else:
-            base_path = join(pkg_dir, base_path)
 
-        if entry_type == "module":
+        if entry_type == "url_file":
+            src = kwargs["source"]
+            target = name
+            if exists(src):
+                result.append((src, target))
+            else:
+                print(color("Warning:", _COLOR_WARN), f"File '{src}' not found for '{pkg_name}'.")
+
+        elif entry_type == "module":
+            base_path = kwargs.get("base_path", ".")
+            if base_path == ".":
+                base_path = pkg_dir
+            else:
+                base_path = join(pkg_dir, base_path)
             src = join(base_path, name)
             if exists(src):
                 result.append((src, name))
@@ -449,6 +604,11 @@ def collect_files(pkg_name, pkg_info):
                 print(color("Warning:", _COLOR_WARN), f"File '{src}' not found in '{pkg_name}'.")
 
         elif entry_type == "package":
+            base_path = kwargs.get("base_path", ".")
+            if base_path == ".":
+                base_path = pkg_dir
+            else:
+                base_path = join(pkg_dir, base_path)
             pkg_src_dir = join(base_path, name)
             specified_files = kwargs.get("files")
 
@@ -492,7 +652,7 @@ def deploy_packages(package_names, all_packages, output_dir, dry_run=False):
 
         pkg_info = all_packages[pkg_name]
         files = collect_files(pkg_name, pkg_info)
-        metadata, _, _ = parse_manifest(pkg_info["manifest"])
+        metadata, _, _ = parse_package(pkg_info)
         version = metadata.get("version", "")
 
         if not files:
@@ -534,21 +694,24 @@ def list_packages(all_packages, filter_pattern=None):
 
     max_name = max(len(n) for n in names)
     max_lib = max(len(all_packages[n]["lib"]) for n in names)
+    max_fmt = 3  # "mpy" or "mip"
 
     print(
         f"{ljust('Package', max_name)} {ljust('Library', max_lib)} "
-        f"{ljust('Version', 10)} Dependencies"
+        f"{ljust('Fmt', max_fmt)} {ljust('Version', 10)} Dependencies"
     )
-    print("-" * (max_name + max_lib + 30))
+    print("-" * (max_name + max_lib + max_fmt + 35))
 
     for name in names:
         pkg = all_packages[name]
-        metadata, _, deps = parse_manifest(pkg["manifest"])
+        metadata, _, deps = parse_package(pkg)
         version = metadata.get("version", "")
         dep_str = ", ".join(deps) if deps else ""
+        fmt = "mip" if pkg.get("format") == "package.json" else "mpy"
         print(
             f"{color(ljust(name, max_name), _COLOR_BOLD)} "
             f"{ljust(pkg['lib'], max_lib)} "
+            f"{ljust(fmt, max_fmt)} "
             f"{ljust(version or '', 10)} "
             f"{color(dep_str, _COLOR_DIM)}"
         )
@@ -563,7 +726,7 @@ def list_packages(all_packages, filter_pattern=None):
 _USAGE = """\
 usage: deploy.py [-h] [--output DIR] [--all] [--unix-ffi] [--no-deps]
                  [--dry-run] [--list] [--filter PAT] [--lib-dir DIR]
-                 [packages ...]
+                 [--repo DIR] [packages ...]
 
 Deploy micropython-lib packages to a local directory for the Unix port.
 Compatible with both CPython 3 and MicroPython.
@@ -577,6 +740,9 @@ options:
   --all                 Deploy all available packages.
   --unix-ffi            Include unix-ffi packages (overrides stdlib for
                         same-named packages).
+  --repo DIR            Add a third-party repo to scan for packages.  Supports
+                        both manifest.py and package.json formats.  May be
+                        specified multiple times.
   --no-deps             Do not install dependencies automatically.
   -n, --dry-run         Show what would be installed without copying files.
   -l, --list            List all available packages and exit.
@@ -587,7 +753,8 @@ examples:
   deploy.py -o ~/.micropython/lib logging argparse
   deploy.py -o ~/.micropython/lib --all
   deploy.py -o ~/.micropython/lib --all --unix-ffi
-  deploy.py --list
+  deploy.py -o lib --repo /path/to/micropython-async primitives threadsafe
+  deploy.py --list --repo /path/to/micropython-async
   deploy.py --list --filter 'hash*'
 """
 
@@ -602,6 +769,7 @@ def parse_args(argv=None):
         output = None
         all = False
         unix_ffi = False
+        repos = []
         no_deps = False
         dry_run = False
         list_pkgs = False
@@ -610,6 +778,7 @@ def parse_args(argv=None):
 
     args = Args()
     args.packages = []
+    args.repos = []
     i = 0
 
     def _need_value(name):
@@ -633,6 +802,10 @@ def parse_args(argv=None):
             args.all = True
         elif a == "--unix-ffi":
             args.unix_ffi = True
+        elif a == "--repo":
+            args.repos.append(_need_value(a))
+        elif a.startswith("--repo="):
+            args.repos.append(a.split("=", 1)[1])
         elif a == "--no-deps":
             args.no_deps = True
         elif a in ("-n", "--dry-run"):
@@ -675,6 +848,13 @@ def main():
         sys.exit(1)
 
     all_packages = discover_packages(DEFAULT_LIB_DIRS, include_unix_ffi=args.unix_ffi)
+
+    for repo_dir in args.repos:
+        if not isdir(repo_dir):
+            print(f"Error: repo directory not found: '{repo_dir}'.", file=sys.stderr)
+            sys.exit(1)
+        repo_pkgs = discover_repo_packages(repo_dir)
+        all_packages.update(repo_pkgs)
 
     if args.list_pkgs:
         list_packages(all_packages, args.filter)
