@@ -2,6 +2,8 @@
 """
 Deploy micropython-lib packages to a local directory for the MicroPython Unix port.
 
+Compatible with both CPython 3 and MicroPython (Unix port).
+
 The official 'mip' tool downloads pre-compiled .mpy files from the network.
 There is no official way to deploy packages from a local micropython-lib source
 tree to a directory usable by the Unix port.  This script fills that gap.
@@ -12,41 +14,249 @@ resolves dependencies, and copies .py source files to a destination directory.
 Usage examples:
 
     # Deploy specific packages (with automatic dependency resolution):
-    ./tools/deploy.py --output ~/.micropython/lib logging argparse
+    deploy.py --output ~/.micropython/lib logging argparse
 
     # Deploy all packages from default libraries (python-stdlib, python-ecosys, micropython):
-    ./tools/deploy.py --output ~/.micropython/lib --all
+    deploy.py --output ~/.micropython/lib --all
 
     # Include unix-ffi packages too:
-    ./tools/deploy.py --output ~/.micropython/lib --all --unix-ffi
+    deploy.py --output ~/.micropython/lib --all --unix-ffi
 
     # Deploy specific packages including unix-ffi search path:
-    ./tools/deploy.py --output ~/.micropython/lib --unix-ffi os json
+    deploy.py --output ~/.micropython/lib --unix-ffi os json
 
     # Dry-run to see what would be installed:
-    ./tools/deploy.py --output ~/.micropython/lib --dry-run logging requests
+    deploy.py --output ~/.micropython/lib --dry-run logging requests
 
     # List all available packages:
-    ./tools/deploy.py --list
+    deploy.py --list
 
     # List packages matching a pattern:
-    ./tools/deploy.py --list --filter "hash*"
+    deploy.py --list --filter "hash*"
 
 The output directory should be in MICROPYPATH so MicroPython can find the modules:
     export MICROPYPATH=~/.micropython/lib
-
 """
 
-import argparse
-import fnmatch
-import glob
 import os
-import shutil
 import sys
 
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-LIB_DIR = os.path.dirname(SCRIPT_DIR)
+# ===========================================================================
+# Portable stdlib shims
+# ===========================================================================
+# Each block tries CPython's stdlib first, then falls back to a minimal
+# implementation sufficient for this script.  Fallbacks use only builtins
+# available in MicroPython's Unix port (os.listdir, os.stat, os.mkdir,
+# os.getcwd, open).  Function names match their Python 3 stdlib equivalents.
+
+# ---- os.path ----
+
+try:
+    from os.path import abspath, basename, dirname, exists, isdir, join, relpath
+except ImportError:
+
+    def join(*parts):
+        """os.path.join -- combine path components."""
+        result = ""
+        for p in parts:
+            if p.startswith("/"):
+                result = p
+            elif not result or result.endswith("/"):
+                result += p
+            else:
+                result += "/" + p
+        return result
+
+    def dirname(path):
+        """os.path.dirname -- directory component of path."""
+        idx = path.rfind("/")
+        if idx < 0:
+            return ""
+        if idx == 0:
+            return "/"
+        return path[:idx]
+
+    def basename(path):
+        """os.path.basename -- final component of path."""
+        idx = path.rfind("/")
+        if idx < 0:
+            return path
+        return path[idx + 1:]
+
+    def exists(path):
+        """os.path.exists -- True if path exists."""
+        try:
+            os.stat(path)
+            return True
+        except OSError:
+            return False
+
+    def isdir(path):
+        """os.path.isdir -- True if path is a directory."""
+        try:
+            return os.stat(path)[0] & 0o040000 != 0
+        except OSError:
+            return False
+
+    def abspath(path):
+        """os.path.abspath -- return absolute version of path."""
+        if not path.startswith("/"):
+            path = os.getcwd() + "/" + path
+        parts = path.split("/")
+        normalized = []
+        for p in parts:
+            if p == "" or p == ".":
+                if not normalized:
+                    normalized.append("")
+            elif p == "..":
+                if len(normalized) > 1:
+                    normalized.pop()
+            else:
+                normalized.append(p)
+        return "/".join(normalized) or "/"
+
+    def relpath(path, start="."):
+        """os.path.relpath -- compute relative path from start to path."""
+        path = abspath(path)
+        start = abspath(start)
+        path_parts = [p for p in path.split("/") if p]
+        start_parts = [p for p in start.split("/") if p]
+        i = 0
+        while (
+            i < len(path_parts)
+            and i < len(start_parts)
+            and path_parts[i] == start_parts[i]
+        ):
+            i += 1
+        ups = len(start_parts) - i
+        remainder = path_parts[i:]
+        if not ups and not remainder:
+            return "."
+        return "/".join([".."] * ups + remainder)
+
+
+# ---- os.walk ----
+
+try:
+    from os import walk
+except (ImportError, AttributeError):
+
+    def walk(top, topdown=True):
+        """os.walk -- recursive directory tree generator."""
+        try:
+            names = sorted(os.listdir(top))
+        except OSError:
+            return
+        dirs, files = [], []
+        for name in names:
+            full = join(top, name)
+            try:
+                if os.stat(full)[0] & 0o040000:
+                    dirs.append(name)
+                else:
+                    files.append(name)
+            except OSError:
+                files.append(name)
+        if topdown:
+            yield top, dirs, files
+        for d in dirs:
+            yield from walk(join(top, d), topdown=topdown)
+        if not topdown:
+            yield top, dirs, files
+
+
+# ---- os.makedirs ----
+
+try:
+    from os import makedirs
+except (ImportError, AttributeError):
+
+    def makedirs(path, exist_ok=False):
+        """os.makedirs -- recursive directory creation."""
+        path = abspath(path)
+        parts = path.split("/")
+        current = ""
+        for part in parts:
+            if not current:
+                current = part or "/"
+            else:
+                current = current.rstrip("/") + "/" + part
+            if current == "/":
+                continue
+            try:
+                os.mkdir(current)
+            except OSError:
+                if not exist_ok and not isdir(current):
+                    raise
+
+
+# ---- shutil.copy2 ----
+
+try:
+    from shutil import copy2
+except ImportError:
+
+    def copy2(src, dst):
+        """shutil.copy2 -- copy file contents (metadata preservation best-effort)."""
+        with open(src, "rb") as f_in:
+            data = f_in.read()
+        with open(dst, "wb") as f_out:
+            f_out.write(data)
+
+
+# ---- fnmatch.fnmatch ----
+
+try:
+    from fnmatch import fnmatch
+except ImportError:
+
+    def fnmatch(name, pattern):
+        """fnmatch.fnmatch -- Unix shell-style pattern matching (* and ?)."""
+        return _fnmatch_impl(name, pattern, 0, 0)
+
+    def _fnmatch_impl(name, pattern, ni, pi):
+        while pi < len(pattern):
+            pc = pattern[pi]
+            if pc == "*":
+                while pi < len(pattern) and pattern[pi] == "*":
+                    pi += 1
+                if pi == len(pattern):
+                    return True
+                for ni2 in range(ni, len(name) + 1):
+                    if _fnmatch_impl(name, pattern, ni2, pi):
+                        return True
+                return False
+            elif pc == "?":
+                if ni >= len(name):
+                    return False
+                ni += 1
+                pi += 1
+            else:
+                if ni >= len(name) or name[ni] != pc:
+                    return False
+                ni += 1
+                pi += 1
+        return ni == len(name)
+
+
+
+# ---- str.ljust ----
+
+def ljust(s, width, fillchar=" "):
+    """str.ljust -- left-justify string in a field of given width."""
+    pad = width - len(s)
+    if pad > 0:
+        return s + fillchar * pad
+    return s
+
+
+# ===========================================================================
+# Constants
+# ===========================================================================
+
+SCRIPT_DIR = dirname(abspath(__file__))
+LIB_DIR = dirname(SCRIPT_DIR)
 
 DEFAULT_LIB_DIRS = ("micropython", "python-stdlib", "python-ecosys")
 
@@ -58,10 +268,39 @@ _COLOR_DIM = "\033[2m"
 _COLOR_OFF = "\033[0m"
 
 
+def _use_color():
+    try:
+        return sys.stdout.isatty()
+    except AttributeError:
+        return False
+
+
+_USE_COLOR = _use_color()
+
+
 def color(text, code):
-    if sys.stdout.isatty():
-        return code + text + _COLOR_OFF
+    if _USE_COLOR:
+        return f"{code}{text}{_COLOR_OFF}"
     return text
+
+
+# ===========================================================================
+# Recursive file finder (replaces glob.glob with recursive=True)
+# ===========================================================================
+
+
+def find_files(directory, filename):
+    """Recursively find all files named *filename* under *directory*."""
+    results = []
+    for root, _dirs, files in walk(directory):
+        if filename in files:
+            results.append(join(root, filename))
+    return results
+
+
+# ===========================================================================
+# Core logic
+# ===========================================================================
 
 
 def discover_packages(lib_dirs, include_unix_ffi=False):
@@ -75,16 +314,13 @@ def discover_packages(lib_dirs, include_unix_ffi=False):
 
     packages = {}
     for lib_name in search_dirs:
-        lib_path = os.path.join(LIB_DIR, lib_name)
-        if not os.path.isdir(lib_path):
+        lib_path = join(LIB_DIR, lib_name)
+        if not isdir(lib_path):
             continue
-        for manifest_path in glob.glob(
-            os.path.join(lib_path, "**", "manifest.py"), recursive=True
-        ):
-            pkg_dir = os.path.dirname(manifest_path)
-            pkg_name = os.path.basename(pkg_dir)
+        for manifest_path in find_files(lib_path, "manifest.py"):
+            pkg_dir = dirname(manifest_path)
+            pkg_name = basename(pkg_dir)
             if pkg_name in packages:
-                # unix-ffi should override stdlib for same-named packages
                 if lib_name == "unix-ffi":
                     packages[pkg_name] = {
                         "manifest": manifest_path,
@@ -102,7 +338,7 @@ def discover_packages(lib_dirs, include_unix_ffi=False):
 
 def parse_manifest(manifest_path):
     """
-    Parse a manifest.py extracting metadata, file entries, and dependencies.
+    Parse a manifest.py, extracting metadata, file entries, and dependencies.
     Uses a sandboxed exec with stub functions for the manifest API.
 
     Returns (metadata_dict, file_entries, dependencies).
@@ -172,10 +408,7 @@ def resolve_dependencies(package_names, all_packages, resolved=None, resolving=N
         if name in resolved:
             continue
         if name not in all_packages:
-            print(
-                color("Warning:", _COLOR_WARN),
-                "Package '{}' not found, skipping.".format(name),
-            )
+            print(color("Warning:", _COLOR_WARN), f"Package '{name}' not found, skipping.")
             continue
         if name in resolving:
             continue
@@ -206,55 +439,50 @@ def collect_files(pkg_name, pkg_info):
         if base_path == ".":
             base_path = pkg_dir
         else:
-            base_path = os.path.join(pkg_dir, base_path)
+            base_path = join(pkg_dir, base_path)
 
         if entry_type == "module":
-            src = os.path.join(base_path, name)
-            if os.path.exists(src):
+            src = join(base_path, name)
+            if exists(src):
                 result.append((src, name))
             else:
-                print(
-                    color("Warning:", _COLOR_WARN),
-                    "File '{}' not found in package '{}'.".format(src, pkg_name),
-                )
+                print(color("Warning:", _COLOR_WARN), f"File '{src}' not found in '{pkg_name}'.")
 
         elif entry_type == "package":
-            pkg_src_dir = os.path.join(base_path, name)
+            pkg_src_dir = join(base_path, name)
             specified_files = kwargs.get("files")
 
             if specified_files:
                 for rel_file in specified_files:
-                    src = os.path.join(pkg_src_dir, rel_file)
-                    target = os.path.join(name, rel_file)
-                    if os.path.exists(src):
+                    src = join(pkg_src_dir, rel_file)
+                    target = join(name, rel_file)
+                    if exists(src):
                         result.append((src, target))
                     else:
                         print(
                             color("Warning:", _COLOR_WARN),
-                            "File '{}' not found in package '{}'.".format(src, pkg_name),
+                            f"File '{src}' not found in '{pkg_name}'.",
                         )
             else:
-                if os.path.isdir(pkg_src_dir):
-                    for root, dirs, files in os.walk(pkg_src_dir):
+                if isdir(pkg_src_dir):
+                    for root, dirs, files in walk(pkg_src_dir):
                         dirs.sort()
                         for f in sorted(files):
                             if f.endswith(".py"):
-                                src = os.path.join(root, f)
-                                rel = os.path.relpath(src, base_path)
+                                src = join(root, f)
+                                rel = relpath(src, base_path)
                                 result.append((src, rel))
                 else:
                     print(
                         color("Warning:", _COLOR_WARN),
-                        "Package directory '{}' not found for '{}'.".format(
-                            pkg_src_dir, pkg_name
-                        ),
+                        f"Package directory '{pkg_src_dir}' not found for '{pkg_name}'.",
                     )
 
     return result
 
 
 def deploy_packages(package_names, all_packages, output_dir, dry_run=False):
-    """Deploy resolved packages to output_dir. Returns (pkg_count, file_count)."""
+    """Deploy resolved packages to output_dir.  Returns (pkg_count, file_count)."""
     total_files = 0
     total_packages = 0
 
@@ -268,35 +496,22 @@ def deploy_packages(package_names, all_packages, output_dir, dry_run=False):
         version = metadata.get("version", "")
 
         if not files:
-            print(
-                "  {} {} {}".format(
-                    color("skip", _COLOR_DIM),
-                    pkg_name,
-                    color("(no files)", _COLOR_DIM),
-                )
-            )
+            print(f"  {color('skip', _COLOR_DIM)} {pkg_name} {color('(no files)', _COLOR_DIM)}")
             continue
 
         action = color("would install", _COLOR_WARN) if dry_run else color("install", _COLOR_OK)
-        ver_str = color("@" + version, _COLOR_DIM) if version else ""
-        print(
-            "  {} {}{} [{} file(s)]".format(
-                action,
-                color(pkg_name, _COLOR_BOLD),
-                ver_str,
-                len(files),
-            )
-        )
+        ver_str = color(f"@{version}", _COLOR_DIM) if version else ""
+        print(f"  {action} {color(pkg_name, _COLOR_BOLD)}{ver_str} [{len(files)} file(s)]")
 
         for src, target in files:
-            dest = os.path.join(output_dir, target)
+            dest = join(output_dir, target)
             if dry_run:
-                print("    {} -> {}".format(color(target, _COLOR_DIM), dest))
+                print(f"    {color(target, _COLOR_DIM)} -> {dest}")
             else:
-                dest_dir = os.path.dirname(dest)
-                if dest_dir and not os.path.isdir(dest_dir):
-                    os.makedirs(dest_dir, exist_ok=True)
-                shutil.copy2(src, dest)
+                dest_dir = dirname(dest)
+                if dest_dir and not isdir(dest_dir):
+                    makedirs(dest_dir, exist_ok=True)
+                copy2(src, dest)
 
         total_files += len(files)
         total_packages += 1
@@ -308,24 +523,22 @@ def list_packages(all_packages, filter_pattern=None):
     """Print a formatted list of all available packages."""
     names = sorted(all_packages.keys())
     if filter_pattern:
-        names = [n for n in names if fnmatch.fnmatch(n, filter_pattern)]
+        names = [n for n in names if fnmatch(n, filter_pattern)]
 
     if not names:
         msg = "No packages found"
         if filter_pattern:
-            msg += " matching '{}'".format(filter_pattern)
+            msg += f" matching '{filter_pattern}'"
         print(msg + ".")
         return
 
     max_name = max(len(n) for n in names)
     max_lib = max(len(all_packages[n]["lib"]) for n in names)
 
-    print("{} {} {} {}".format(
-        "Package".ljust(max_name),
-        "Library".ljust(max_lib),
-        "Version".ljust(10),
-        "Dependencies",
-    ))
+    print(
+        f"{ljust('Package', max_name)} {ljust('Library', max_lib)} "
+        f"{ljust('Version', 10)} Dependencies"
+    )
     print("-" * (max_name + max_lib + 30))
 
     for name in names:
@@ -334,85 +547,131 @@ def list_packages(all_packages, filter_pattern=None):
         version = metadata.get("version", "")
         dep_str = ", ".join(deps) if deps else ""
         print(
-            "{} {} {} {}".format(
-                color(name.ljust(max_name), _COLOR_BOLD),
-                pkg["lib"].ljust(max_lib),
-                (version or "").ljust(10),
-                color(dep_str, _COLOR_DIM),
-            )
+            f"{color(ljust(name, max_name), _COLOR_BOLD)} "
+            f"{ljust(pkg['lib'], max_lib)} "
+            f"{ljust(version or '', 10)} "
+            f"{color(dep_str, _COLOR_DIM)}"
         )
 
-    print("\n{} package(s) found.".format(len(names)))
+    print(f"\n{len(names)} package(s) found.")
+
+
+# ===========================================================================
+# Argument parsing (replaces argparse for MicroPython compatibility)
+# ===========================================================================
+
+_USAGE = """\
+usage: deploy.py [-h] [--output DIR] [--all] [--unix-ffi] [--no-deps]
+                 [--dry-run] [--list] [--filter PAT] [--lib-dir DIR]
+                 [packages ...]
+
+Deploy micropython-lib packages to a local directory for the Unix port.
+Compatible with both CPython 3 and MicroPython.
+
+positional arguments:
+  packages              Package names to install (use --all for everything).
+
+options:
+  -h, --help            Show this help message and exit.
+  -o, --output DIR      Destination directory for deployed packages.
+  --all                 Deploy all available packages.
+  --unix-ffi            Include unix-ffi packages (overrides stdlib for
+                        same-named packages).
+  --no-deps             Do not install dependencies automatically.
+  -n, --dry-run         Show what would be installed without copying files.
+  -l, --list            List all available packages and exit.
+  --filter PAT          Filter pattern for --list (glob, e.g. 'hash*').
+  --lib-dir DIR         Path to micropython-lib root (default: auto-detected).
+
+examples:
+  deploy.py -o ~/.micropython/lib logging argparse
+  deploy.py -o ~/.micropython/lib --all
+  deploy.py -o ~/.micropython/lib --all --unix-ffi
+  deploy.py --list
+  deploy.py --list --filter 'hash*'
+"""
+
+
+def parse_args(argv=None):
+    """Minimal argument parser compatible with both CPython and MicroPython."""
+    if argv is None:
+        argv = sys.argv[1:]
+
+    class Args:
+        packages = []
+        output = None
+        all = False
+        unix_ffi = False
+        no_deps = False
+        dry_run = False
+        list_pkgs = False
+        filter = None
+        lib_dir = None
+
+    args = Args()
+    args.packages = []
+    i = 0
+
+    def _need_value(name):
+        nonlocal i
+        i += 1
+        if i >= len(argv):
+            print(f"Error: {name} requires a value.", file=sys.stderr)
+            sys.exit(2)
+        return argv[i]
+
+    while i < len(argv):
+        a = argv[i]
+        if a in ("-h", "--help"):
+            print(_USAGE)
+            sys.exit(0)
+        elif a in ("-o", "--output"):
+            args.output = _need_value(a)
+        elif a.startswith("--output="):
+            args.output = a.split("=", 1)[1]
+        elif a == "--all":
+            args.all = True
+        elif a == "--unix-ffi":
+            args.unix_ffi = True
+        elif a == "--no-deps":
+            args.no_deps = True
+        elif a in ("-n", "--dry-run"):
+            args.dry_run = True
+        elif a in ("-l", "--list"):
+            args.list_pkgs = True
+        elif a == "--filter":
+            args.filter = _need_value(a)
+        elif a.startswith("--filter="):
+            args.filter = a.split("=", 1)[1]
+        elif a == "--lib-dir":
+            args.lib_dir = _need_value(a)
+        elif a.startswith("--lib-dir="):
+            args.lib_dir = a.split("=", 1)[1]
+        elif a.startswith("-"):
+            print(f"Error: unknown option: {a}", file=sys.stderr)
+            print("Use -h for help.", file=sys.stderr)
+            sys.exit(2)
+        else:
+            args.packages.append(a)
+        i += 1
+
+    return args
+
+
+# ===========================================================================
+# Entry point
+# ===========================================================================
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Deploy micropython-lib packages to a local directory for the Unix port.",
-        epilog=(
-            "Examples:\n"
-            "  %(prog)s --output ~/.micropython/lib logging argparse\n"
-            "  %(prog)s --output ~/.micropython/lib --all\n"
-            "  %(prog)s --output ~/.micropython/lib --all --unix-ffi\n"
-            "  %(prog)s --list\n"
-            "  %(prog)s --list --filter 'hash*'\n"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    parser.add_argument(
-        "packages",
-        nargs="*",
-        help="Package names to install (use --all for everything).",
-    )
-    parser.add_argument(
-        "--output", "-o",
-        help="Destination directory for deployed packages.",
-    )
-    parser.add_argument(
-        "--all",
-        action="store_true",
-        help="Deploy all available packages.",
-    )
-    parser.add_argument(
-        "--unix-ffi",
-        action="store_true",
-        help="Include unix-ffi packages (overrides stdlib equivalents for same-named packages).",
-    )
-    parser.add_argument(
-        "--no-deps",
-        action="store_true",
-        help="Do not install dependencies automatically.",
-    )
-    parser.add_argument(
-        "--dry-run", "-n",
-        action="store_true",
-        help="Show what would be installed without copying files.",
-    )
-    parser.add_argument(
-        "--list", "-l",
-        action="store_true",
-        dest="list_pkgs",
-        help="List all available packages and exit.",
-    )
-    parser.add_argument(
-        "--filter",
-        default=None,
-        help="Filter pattern for --list (shell glob, e.g. 'hash*').",
-    )
-    parser.add_argument(
-        "--lib-dir",
-        default=None,
-        help="Path to micropython-lib root (default: auto-detected from script location).",
-    )
-
-    args = parser.parse_args()
+    args = parse_args()
 
     global LIB_DIR
     if args.lib_dir:
-        LIB_DIR = os.path.abspath(args.lib_dir)
+        LIB_DIR = abspath(args.lib_dir)
 
-    if not os.path.isdir(LIB_DIR):
-        print("Error: micropython-lib not found at '{}'.".format(LIB_DIR), file=sys.stderr)
+    if not isdir(LIB_DIR):
+        print(f"Error: micropython-lib not found at '{LIB_DIR}'.", file=sys.stderr)
         sys.exit(1)
 
     all_packages = discover_packages(DEFAULT_LIB_DIRS, include_unix_ffi=args.unix_ffi)
@@ -422,12 +681,16 @@ def main():
         return
 
     if not args.output:
-        parser.error("--output is required when installing packages.")
+        print("Error: --output is required when installing packages.", file=sys.stderr)
+        print("Use -h for help.", file=sys.stderr)
+        sys.exit(2)
 
     if not args.all and not args.packages:
-        parser.error("Specify package names or use --all.")
+        print("Error: specify package names or use --all.", file=sys.stderr)
+        print("Use -h for help.", file=sys.stderr)
+        sys.exit(2)
 
-    output_dir = os.path.abspath(args.output)
+    output_dir = abspath(args.output)
 
     if args.all:
         requested = sorted(all_packages.keys())
@@ -438,7 +701,7 @@ def main():
     if unknown:
         print(
             color("Error:", _COLOR_ERR),
-            "Unknown package(s): {}".format(", ".join(unknown)),
+            f"Unknown package(s): {', '.join(unknown)}",
             file=sys.stderr,
         )
         print("Use --list to see available packages.", file=sys.stderr)
@@ -450,28 +713,23 @@ def main():
         resolved = resolve_dependencies(requested, all_packages)
 
     dep_count = len(resolved) - len(requested) if not args.all else 0
-    print(
-        "Deploying {} package(s){} to {}{}".format(
-            len(resolved),
-            " ({} deps)".format(dep_count) if dep_count > 0 else "",
-            output_dir,
-            color(" (dry run)", _COLOR_WARN) if args.dry_run else "",
-        )
-    )
+    dep_info = f" ({dep_count} deps)" if dep_count > 0 else ""
+    dry_tag = color(" (dry run)", _COLOR_WARN) if args.dry_run else ""
+    print(f"Deploying {len(resolved)} package(s){dep_info} to {output_dir}{dry_tag}")
 
     if not args.dry_run:
-        os.makedirs(output_dir, exist_ok=True)
+        makedirs(output_dir, exist_ok=True)
 
     n_pkgs, n_files = deploy_packages(resolved, all_packages, output_dir, dry_run=args.dry_run)
 
-    summary_verb = "Would deploy" if args.dry_run else "Deployed"
-    print("\n{} {} package(s), {} file(s).".format(summary_verb, n_pkgs, n_files))
+    verb = "Would deploy" if args.dry_run else "Deployed"
+    print(f"\n{verb} {n_pkgs} package(s), {n_files} file(s).")
 
     if not args.dry_run and n_pkgs > 0:
         print(
             "\nTo use with MicroPython Unix port, ensure MICROPYPATH includes this directory:"
         )
-        print("  export MICROPYPATH={}".format(output_dir))
+        print(f"  export MICROPYPATH={output_dir}")
 
 
 if __name__ == "__main__":
