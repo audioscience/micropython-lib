@@ -672,6 +672,9 @@ def deploy_packages(package_names, all_packages, output_dir, dry_run=False):
                 if dest_dir and not isdir(dest_dir):
                     makedirs(dest_dir, exist_ok=True)
                 copy2(src, dest)
+                if version and dest.endswith(".py"):
+                    with open(dest, "a") as f:
+                        f.write(f"\n\n__version__ = '{version}'\n")
 
         total_files += len(files)
         total_packages += 1
