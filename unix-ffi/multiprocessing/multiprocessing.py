@@ -1,6 +1,7 @@
 import os
 import pickle
 import select
+import traceback
 
 
 class Process:
@@ -14,10 +15,14 @@ class Process:
     def start(self):
         self.pid = os.fork()
         if not self.pid:
-            if self.r:
-                self.r.close()
-            self.target(*self.args, **self.kwargs)
-            os._exit(0)
+            try:
+                if self.r:
+                    self.r.close()
+                self.target(*self.args, **self.kwargs)
+            except:
+                traceback.print_exc()
+            finally:
+                os._exit(0)
         else:
             if self.w:
                 self.w.close()
@@ -35,7 +40,7 @@ class Process:
 class Connection:
     def __init__(self, fd):
         self.fd = fd
-        self.f = open(fd)
+        self.f = open(fd, 'b')
 
     def __repr__(self):
         return "<Connection %s>" % self.f
