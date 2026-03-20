@@ -169,12 +169,15 @@ class Logger:
 
 
 def getLogger(name=None):
+    if "root" not in _loggers:
+        basicConfig()
     if name is None:
         name = "root"
     if name not in _loggers:
         _loggers[name] = Logger(name)
-        if name == "root":
-            basicConfig()
+        if name != "root":
+            _loggers[name].level = _loggers["root"].level
+            _loggers[name].handlers = _loggers["root"].handlers
     return _loggers[name]
 
 
