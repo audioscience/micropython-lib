@@ -18,12 +18,26 @@ def abspath(s):
     return s
 
 
-def join(*args):
-    # TODO: this is non-compliant
-    if type(args[0]) is bytes:
-        return b"/".join(args)
+realpath = os.realpath
+
+
+def join(a, *p):
+    """Combine multiple path components using '/', adding separators as necessary.
+    If an absolute path is encountered, all parts before it are ignored.
+    If the final component is empty, the result will have a trailing separator."""
+    if type(a) is bytes:
+        sep = b"/"
     else:
-        return "/".join(args)
+        sep = "/"
+    path = a
+    for b in p:
+        if b.startswith(sep) or not path:
+            path = b
+        elif path.endswith(sep):
+            path += b
+        else:
+            path += sep + b
+    return path
 
 
 def split(path):
