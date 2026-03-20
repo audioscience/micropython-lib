@@ -1,3 +1,14 @@
+# Replace built-in os module.
+from uos import *
+
+# Provide optional dependencies (which may be installed separately).
+try:
+    from . import path
+except ImportError:
+    pass
+
+
+
 import array
 import struct
 import errno as errno_
@@ -10,16 +21,21 @@ W_OK = const(2)
 X_OK = const(1)
 F_OK = const(0)
 
-O_ACCMODE = 0o0000003
-O_RDONLY = 0o0000000
-O_WRONLY = 0o0000001
-O_RDWR = 0o0000002
-O_CREAT = 0o0000100
-O_EXCL = 0o0000200
-O_NOCTTY = 0o0000400
-O_TRUNC = 0o0001000
-O_APPEND = 0o0002000
+O_ACCMODE  = 0o0000003
+O_RDONLY   = 0o0000000
+O_WRONLY   = 0o0000001
+O_RDWR     = 0o0000002
+O_CREAT    = 0o0000100
+O_EXCL     = 0o0000200
+O_NOCTTY   = 0o0000400
+O_TRUNC    = 0o0001000
+O_APPEND   = 0o0002000
 O_NONBLOCK = 0o0004000
+
+WNOHANG    = 0x00000001
+
+SIGKILL    = 9
+SIGTERM    = 15
 
 error = OSError
 name = "posix"
@@ -55,6 +71,8 @@ if libc:
     execvp_ = libc.func("i", "execvp", "PP")
     kill_ = libc.func("i", "kill", "ii")
     getenv_ = libc.func("s", "getenv", "P")
+    setpgid_ = libc.func("i", "setpgid", "ii")
+
 
 
 def check_error(ret):
@@ -162,7 +180,7 @@ def walk(top, topdown=True):
     files = []
     dirs = []
     for dirent in ilistdir(top):
-        mode = dirent[1] << 12
+        mode = dirent[1]
         fname = fsdecode(dirent[0])
         if stat_.S_ISDIR(mode):
             if fname != "." and fname != "..":
@@ -261,6 +279,10 @@ def kill(pid, sig):
     r = kill_(pid, sig)
     check_error(r)
 
+def setpgid(pid, pgid):
+    r = setpgid_(pid, pgid)
+    check_error(r)
+    return r
 
 def system(command):
     r = system_(command)
