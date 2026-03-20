@@ -202,9 +202,11 @@ class ArgumentParser:
             while args and not args[0].startswith("-"):
                 unknown.append(args.pop(0))
 
-        # parse all args
-        parsed_pos = False
-        while args or not parsed_pos:
+        # Parse all args, interleaving optional and positional parsing so
+        # that optional flags (e.g. --port 8080) can appear between, before,
+        # or after positional arguments — matching CPython behaviour.
+        pos_index = 0
+        while args or pos_index < len(self.pos):
             if args and args[0].startswith("-") and args[0] != "-" and args[0] != "--":
                 # optional arg
                 a = args.pop(0)
@@ -223,20 +225,19 @@ class ArgumentParser:
                         consume_unknown()
                     else:
                         raise _ArgError("unknown option %s" % a)
+            elif pos_index < len(self.pos):
+                # next positional arg
+                pos = self.pos[pos_index]
+                arg_dest.append(pos.dest)
+                arg_vals.append(pos.parse(pos.names[0], args))
+                pos_index += 1
             else:
-                # positional arg
-                if parsed_pos:
-                    if return_unknown:
-                        unknown = unknown + args
-                        break
-                    else:
-                        raise _ArgError("extra args: %s" % " ".join(args))
-                for pos in self.pos:
-                    arg_dest.append(pos.dest)
-                    arg_vals.append(pos.parse(pos.names[0], args))
-                parsed_pos = True
+                # all positionals consumed
                 if return_unknown:
-                    consume_unknown()
+                    unknown = unknown + args
+                    break
+                else:
+                    raise _ArgError("extra args: %s" % " ".join(args))
 
         # build and return named tuple with arg values
         values = namedtuple("args", arg_dest)(*arg_vals)
