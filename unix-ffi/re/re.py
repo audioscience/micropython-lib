@@ -8,12 +8,12 @@ pcre2 = ffilib.open("libpcre2-8")
 #       pcre2_code *pcre2_compile(PCRE2_SPTR pattern, PCRE2_SIZE length,
 #           uint32_t options, int *errorcode, PCRE2_SIZE *erroroffset,
 #           pcre2_compile_context *ccontext);
-pcre2_compile = pcre2.func("p", "pcre2_compile_8", "siippp")
+pcre2_compile = pcre2.func("p", "pcre2_compile_8", "sLippp")
 
 #       int pcre2_match(const pcre2_code *code, PCRE2_SPTR subject,
 #           PCRE2_SIZE length, PCRE2_SIZE startoffset, uint32_t options,
 #           pcre2_match_data *match_data, pcre2_match_context *mcontext);
-pcre2_match = pcre2.func("i", "pcre2_match_8", "Psiiipp")
+pcre2_match = pcre2.func("i", "pcre2_match_8", "PsLLipp")
 
 #       int pcre2_pattern_info(const pcre2_code *code, uint32_t what,
 #           void *where);
@@ -33,10 +33,12 @@ pcre2_match_data_create_from_pattern = pcre2.func(
 PCRE2_SIZE_SIZE = uctypes.sizeof({"field": 0 | uctypes.ULONG})
 PCRE2_SIZE_TYPE = "L"
 
-# Real value in pcre2.h is 0xFFFFFFFF for 32bit and
-# 0x0xFFFFFFFFFFFFFFFF for 64bit that is equivalent
-# to -1
-PCRE2_ZERO_TERMINATED = -1
+# PCRE2_ZERO_TERMINATED and PCRE2_UNSET are both ~(PCRE2_SIZE)0 in pcre2.h,
+# i.e. all bits set in a size_t: 0xFFFFFFFF on 32-bit, 0xFFFFFFFFFFFFFFFF
+# on 64-bit.  Compute the unsigned value so it matches what the FFI layer
+# and array.array('L', ...) expect.
+PCRE2_ZERO_TERMINATED = (1 << (PCRE2_SIZE_SIZE * 8)) - 1
+PCRE2_UNSET = PCRE2_ZERO_TERMINATED
 
 
 IGNORECASE = I = 0x8
@@ -62,21 +64,36 @@ class PCREMatch:
         if not n:
             return self.s[self.offsets[0] : self.offsets[1]]
         if len(n) == 1:
-            return self.s[self.offsets[n[0] * 2] : self.offsets[n[0] * 2 + 1]]
-        return tuple(self.s[self.offsets[i * 2] : self.offsets[i * 2 + 1]] for i in n)
+            start = self.offsets[n[0] * 2]
+            if start == PCRE2_UNSET:
+                return None
+            return self.s[start : self.offsets[n[0] * 2 + 1]]
+        return tuple(
+            None if self.offsets[i * 2] == PCRE2_UNSET
+            else self.s[self.offsets[i * 2] : self.offsets[i * 2 + 1]]
+            for i in n
+        )
 
     def groups(self, default=None):
-        assert default is None
-        return tuple(self.group(i + 1) for i in range(self.num - 1))
+        return tuple(
+            default if self.offsets[(i + 1) * 2] == PCRE2_UNSET
+            else self.s[self.offsets[(i + 1) * 2] : self.offsets[(i + 1) * 2 + 1]]
+            for i in range(self.num - 1)
+        )
 
     def start(self, n=0):
-        return self.offsets[n * 2]
+        s = self.offsets[n * 2]
+        return -1 if s == PCRE2_UNSET else s
 
     def end(self, n=0):
-        return self.offsets[n * 2 + 1]
+        e = self.offsets[n * 2 + 1]
+        return -1 if e == PCRE2_UNSET else e
 
     def span(self, n=0):
-        return self.offsets[n * 2], self.offsets[n * 2 + 1]
+        s = self.offsets[n * 2]
+        if s == PCRE2_UNSET:
+            return (-1, -1)
+        return s, self.offsets[n * 2 + 1]
 
 
 class PCREPattern:
@@ -165,7 +182,7 @@ class PCREPattern:
 
 def compile(pattern, flags=0):
     errcode = bytes(4)
-    erroffset = bytes(4)
+    erroffset = bytes(PCRE2_SIZE_SIZE)
     regex = pcre2_compile(pattern, PCRE2_ZERO_TERMINATED, flags, errcode, erroffset, None)
     assert regex
     return PCREPattern(regex)
