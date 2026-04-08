@@ -9,13 +9,35 @@ def normcase(s):
 
 
 def normpath(s):
-    return s
+    if not s:
+        return "."
+    slash = "/"
+    initial_slashes = s.startswith(slash)
+    # POSIX: leading double slash is implementation-defined, keep exactly two.
+    if initial_slashes and s.startswith("//") and not s.startswith("///"):
+        initial_slashes = 2
+    comps = s.split(slash)
+    new_comps = []
+    for comp in comps:
+        if not comp or comp == ".":
+            continue
+        if comp == "..":
+            if new_comps and new_comps[-1] != "..":
+                new_comps.pop()
+            elif not initial_slashes:
+                new_comps.append(comp)
+        else:
+            new_comps.append(comp)
+    s = slash.join(new_comps)
+    if initial_slashes:
+        s = slash * initial_slashes + s
+    return s or "."
 
 
 def abspath(s):
-    if s[0] != "/":
-        return os.getcwd() + "/" + s
-    return s
+    if not s.startswith("/"):
+        s = os.getcwd() + "/" + s
+    return normpath(s)
 
 
 realpath = os.realpath
