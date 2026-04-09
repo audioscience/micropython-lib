@@ -176,7 +176,7 @@ def request(
                 resp_d[k] = v.strip()
             else:
                 parse_headers(l, resp_d)
-    except OSError:
+    except Exception:
         s.close()
         raise
 
