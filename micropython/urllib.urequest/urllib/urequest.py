@@ -68,7 +68,7 @@ def urlopen(url, data=None, method="GET", headers={}):
                     raise ValueError("Unsupported " + l)
             elif l.startswith(b"Location:"):
                 raise NotImplementedError("Redirects not yet supported")
-    except OSError:
+    except Exception:
         s.close()
         raise
 
