@@ -71,7 +71,7 @@ def py_make_scanner(context):
         finally:
             memo.clear()
 
-    return _scan_once
+    return scan_once
 
 
 make_scanner = c_make_scanner or py_make_scanner
