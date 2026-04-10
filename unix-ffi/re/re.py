@@ -28,6 +28,12 @@ pcre2_match_data_create_from_pattern = pcre2.func(
     "p", "pcre2_match_data_create_from_pattern_8", "Pp"
 )
 
+#       void pcre2_match_data_free(pcre2_match_data *match_data);
+pcre2_match_data_free = pcre2.func("v", "pcre2_match_data_free_8", "p")
+
+#       void pcre2_code_free(pcre2_code *code);
+pcre2_code_free = pcre2.func("v", "pcre2_code_free_8", "p")
+
 # PCRE2_SIZE that is of type size_t.
 # Use ULONG as type to support both 32bit and 64bit.
 PCRE2_SIZE_SIZE = uctypes.sizeof({"field": 0 | uctypes.ULONG})
@@ -99,24 +105,28 @@ class PCREMatch:
 class PCREPattern:
     def __init__(self, compiled_ptn):
         self.obj = compiled_ptn
+        buf = array.array("i", [0])
+        pcre2_pattern_info(compiled_ptn, PCRE2_INFO_CAPTURECOUNT, buf)
+        self._cap_count = buf[0]
+        self._ov_size = PCRE2_SIZE_SIZE * (self._cap_count + 1) * 2
+
+    def _free(self):
+        if self.obj:
+            pcre2_code_free(self.obj)
+            self.obj = None
 
     def search(self, s, pos=0, endpos=-1, _flags=0):
         assert endpos == -1, "pos: %d, endpos: %d" % (pos, endpos)
-        buf = array.array("i", [0])
-        pcre2_pattern_info(self.obj, PCRE2_INFO_CAPTURECOUNT, buf)
-        cap_count = buf[0]
         match_data = pcre2_match_data_create_from_pattern(self.obj, None)
         num = pcre2_match(self.obj, s, len(s), pos, _flags, match_data, None)
         if num == -1:
-            # No match
+            pcre2_match_data_free(match_data)
             return None
         ov_ptr = pcre2_get_ovector_pointer(match_data)
-        # pcre2_get_ovector_pointer return PCRE2_SIZE
-        ov_buf = uctypes.bytearray_at(ov_ptr, PCRE2_SIZE_SIZE * (cap_count + 1) * 2)
+        ov_buf = uctypes.bytearray_at(ov_ptr, self._ov_size)
         ov = array.array(PCRE2_SIZE_TYPE, ov_buf)
-        # We don't care how many matching subexpressions we got, we
-        # care only about total # of capturing ones (including empty)
-        return PCREMatch(s, cap_count + 1, ov)
+        pcre2_match_data_free(match_data)
+        return PCREMatch(s, self._cap_count + 1, ov)
 
     def match(self, s, pos=0, endpos=-1):
         return self.search(s, pos, endpos, PCRE2_ANCHORED)
@@ -188,28 +198,52 @@ def compile(pattern, flags=0):
     return PCREPattern(regex)
 
 
+_cache = {}
+_CACHE_MAX = 64
+
+
+def _compile_cached(pattern, flags=0):
+    key = (pattern, flags)
+    cached = _cache.get(key)
+    if cached is not None:
+        return cached
+    if len(_cache) >= _CACHE_MAX:
+        oldest_key = next(iter(_cache))
+        _cache.pop(oldest_key)._free()
+    compiled = compile(pattern, flags)
+    _cache[key] = compiled
+    return compiled
+
+
+def purge():
+    """Clear the pattern cache and free all compiled patterns."""
+    for p in _cache.values():
+        p._free()
+    _cache.clear()
+
+
 def search(pattern, string, flags=0):
-    r = compile(pattern, flags)
+    r = _compile_cached(pattern, flags)
     return r.search(string)
 
 
 def match(pattern, string, flags=0):
-    r = compile(pattern, flags | PCRE2_ANCHORED)
+    r = _compile_cached(pattern, flags | PCRE2_ANCHORED)
     return r.search(string)
 
 
 def sub(pattern, repl, s, count=0, flags=0):
-    r = compile(pattern, flags)
+    r = _compile_cached(pattern, flags)
     return r.sub(repl, s, count)
 
 
 def split(pattern, s, maxsplit=0, flags=0):
-    r = compile(pattern, flags)
+    r = _compile_cached(pattern, flags)
     return r.split(s, maxsplit)
 
 
 def findall(pattern, s, flags=0):
-    r = compile(pattern, flags)
+    r = _compile_cached(pattern, flags)
     return r.findall(s)
 
 
