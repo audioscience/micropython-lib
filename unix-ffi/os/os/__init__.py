@@ -66,6 +66,7 @@ if libc:
     pipe_ = libc.func("i", "pipe", "p")
     _exit_ = libc.func("v", "_exit", "i")
     getpid_ = libc.func("i", "getpid", "")
+    getppid_ = libc.func("i", "getppid", "")
     waitpid_ = libc.func("i", "waitpid", "ipi")
     system_ = libc.func("i", "system", "s")
     execvp_ = libc.func("i", "execvp", "PP")
@@ -73,6 +74,7 @@ if libc:
     getenv_ = libc.func("s", "getenv", "P")
     setpgid_ = libc.func("i", "setpgid", "ii")
     getpgid_ = libc.func("i", "getpgid", "i")
+    prctl_ = libc.func("i", "prctl", "iLLLL")
 
 
 
@@ -269,6 +271,10 @@ def getpid():
     return getpid_()
 
 
+def getppid():
+    return getppid_()
+
+
 def waitpid(pid, opts):
     a = array.array("i", [0])
     r = waitpid_(pid, a, opts)
@@ -287,6 +293,14 @@ def setpgid(pid, pgid):
 
 def getpgid(pid):
     r = getpgid_(pid)
+    check_error(r)
+    return r
+
+# prctl(2) operations (Linux-specific)
+PR_SET_PDEATHSIG = 1
+
+def prctl(option, arg2=0, arg3=0, arg4=0, arg5=0):
+    r = prctl_(option, arg2, arg3, arg4, arg5)
     check_error(r)
     return r
 
