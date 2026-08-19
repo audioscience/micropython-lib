@@ -72,6 +72,7 @@ if libc:
     kill_ = libc.func("i", "kill", "ii")
     getenv_ = libc.func("s", "getenv", "P")
     setpgid_ = libc.func("i", "setpgid", "ii")
+    getpgid_ = libc.func("i", "getpgid", "i")
 
 
 
@@ -281,6 +282,11 @@ def kill(pid, sig):
 
 def setpgid(pid, pgid):
     r = setpgid_(pid, pgid)
+    check_error(r)
+    return r
+
+def getpgid(pid):
+    r = getpgid_(pid)
     check_error(r)
     return r
 
